@@ -1,0 +1,190 @@
+// SPDX-FileCopyrightText: 2026 nop and CIT autonomous robot laboratory
+// SPDX-License-Identifier: BSD-3-Clause
+
+#ifndef VALUE_ITERATION3_PLANNER_HPP_
+#define VALUE_ITERATION3_PLANNER_HPP_
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+namespace value_iteration3 {
+
+int planner_self_test();
+
+struct Scale {
+  static constexpr unsigned prob_base_bit = 18;
+  static constexpr std::uint64_t prob_base = 1ull << prob_base_bit;
+  static constexpr std::uint64_t max_cost = 1000000000ull * prob_base;
+};
+
+struct Action {
+  std::string name;
+  double forward_m;
+  double rotate_deg;
+};
+
+// Immutable copy of a finished field. Safe to read without the planner lock.
+struct View {
+  int nx = 0;
+  int ny = 0;
+  int nt = 0;
+  int t_resolution_deg = 1;
+  double resolution = 0;
+  double origin_x = 0;
+  double origin_y = 0;
+  double origin_qx = 0;
+  double origin_qy = 0;
+  double origin_qz = 0;
+  double origin_qw = 1;
+  std::vector<std::uint64_t> cost;
+  std::vector<std::int8_t> action;
+  std::vector<std::uint8_t> final_state;
+
+  std::size_t index(int ix, int iy, int it) const {
+    return static_cast<std::size_t>(it) +
+           static_cast<std::size_t>(ix) * static_cast<std::size_t>(nt) +
+           static_cast<std::size_t>(iy) * static_cast<std::size_t>(nt) *
+               static_cast<std::size_t>(nx);
+  }
+};
+
+struct SolveResult {
+  bool converged = false;
+  bool cancelled = false;
+  std::uint32_t rounds = 0;
+  std::uint64_t updates = 0;
+};
+
+// One map, one goal, one value function.
+// prepare_goal / solve / apply_scan / propagate are called from a single worker.
+// view() is safe from other threads.
+class Planner {
+ public:
+  explicit Planner(int thread_num = 0);
+  void set_thread_num(int thread_num);
+  void set_logger(std::function<void(const std::string &)> logger);
+
+  bool load_map(int width, int height, double resolution, double origin_x,
+                double origin_y, double qx, double qy, double qz, double qw,
+                const std::vector<std::int8_t> &occupancy, int theta_cells,
+                double safety_radius, double safety_penalty,
+                double goal_margin_radius, int goal_margin_theta_deg);
+
+  void prepare_goal(double x, double y, int yaw_deg);
+  SolveResult solve(const std::atomic<std::uint32_t> &epoch, std::uint32_t ticket);
+
+  void set_window(double x, double y);
+  // Returns true when a cell penalty actually changed.
+  bool apply_scan(const std::vector<float> &ranges, float angle_min,
+                  float angle_increment, float range_min, float range_max,
+                  double x, double y, double yaw);
+  SolveResult propagate(const std::atomic<std::uint32_t> &epoch,
+                        std::uint32_t ticket);
+
+  std::shared_ptr<const View> view() const;
+  const std::vector<Action> &actions() const { return actions_; }
+
+ private:
+  friend int planner_self_test();
+
+  struct Bucket {
+    std::int64_t offset;
+    std::uint64_t prob;
+  };
+
+  void log(const std::string &text) const;
+  void build_transitions();
+  void allocate_field();
+  void fill_cp(std::uint64_t value);
+  void zero_masks();
+  bool heading_is_goal(int ix, int iy, int it) const;
+  bool in_window(int ix, int iy) const;
+  std::vector<std::pair<int, int>> dilate(
+      const std::vector<std::pair<int, int>> &cells) const;
+  bool write_local(int ix, int iy, std::uint64_t neu);
+  std::uint64_t action_cost(int action, int theta, std::int64_t col) const;
+  std::string audit() const;
+  std::uint64_t compute_phase(int worker, bool all_headings);
+  SolveResult run(bool all_headings_first, const std::atomic<std::uint32_t> &epoch,
+                  std::uint32_t ticket);
+  void publish();
+  void warn_unreached() const;
+  std::int64_t pad_col(int ix, int iy) const;
+  std::size_t index_of(int ix, int iy, int it) const;
+  std::size_t mask_index(int ix, int iy) const;
+  bool cancelled(const std::atomic<std::uint32_t> &epoch, std::uint32_t ticket) const;
+
+  template <class F>
+  void for_rows(F fn) const;
+
+  int thread_num_;
+  std::function<void(const std::string &)> logger_;
+
+  std::vector<Action> actions_;
+  // transitions_[action][theta] = successor buckets in the padded field.
+  std::vector<std::vector<std::vector<Bucket>>> transitions_;
+
+  int nx_ = 0;
+  int ny_ = 0;
+  int nt_ = 0;
+  int t_resolution_ = 1;
+  int mx_ = 1;
+  int my_ = 1;
+  int mt_ = 0;
+  std::int64_t row_stride_ = 0;
+  std::size_t n_pad_ = 0;
+  int mask_w_ = 0;
+  std::size_t mask_n_ = 0;
+  double resolution_ = 0;
+  double origin_x_ = 0;
+  double origin_y_ = 0;
+  double origin_qx_ = 0;
+  double origin_qy_ = 0;
+  double origin_qz_ = 0;
+  double origin_qw_ = 1;
+  double goal_margin_radius_ = 0.2;
+  int goal_margin_theta_ = 10;
+  double goal_x_ = 0;
+  double goal_y_ = 0;
+  int goal_yaw_ = 0;
+  bool map_ready_ = false;
+  bool goal_set_ = false;
+  bool field_ready_ = false;
+
+  std::vector<std::uint8_t> free_;
+  std::vector<std::uint64_t> static_pen_;
+  std::vector<std::uint64_t> local_;
+  std::vector<std::uint8_t> dirty_;
+  std::vector<std::uint8_t> final_;
+
+  std::unique_ptr<std::atomic<std::uint64_t>[]> cp_;
+  std::vector<std::uint64_t> pen_;
+  std::vector<std::uint8_t> eval_ok_;
+  std::unique_ptr<std::atomic<std::uint64_t>[]> mask_;
+
+  std::vector<std::pair<int, int>> candidates_;
+  std::vector<std::vector<std::tuple<int, int, std::uint64_t>>> changed_;
+  std::vector<std::pair<int, int>> prev_cells_;
+  std::atomic<std::size_t> cursor_{0};
+  std::atomic<std::uint64_t> updates_{0};
+
+  int win_x0_ = 0;
+  int win_x1_ = -1;
+  int win_y0_ = 0;
+  int win_y1_ = -1;
+
+  mutable std::mutex view_mu_;
+  std::shared_ptr<const View> view_;
+};
+
+}  // namespace value_iteration3
+
+#endif
