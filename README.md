@@ -118,6 +118,37 @@ c++ -std=c++17 -O2 -pthread -I include \
 
 `planner_test ok` means the action list parsed, two thread counts agreed, a far cell reached the goal, a walled-in cell stayed blocked, and a laser hit raised costs without lowering any.
 
+## Differences from value_iteration and value_iteration2
+
+`value_iteration` is the ROS 1 planner. `value_iteration2` is its ROS 2 port. This package keeps the same kind of goal, scan, and velocity command, and changes when the field is solved and which inputs are accepted.
+
+Shared with both of them:
+
+- An occupancy grid, a pose in `map`, and a laser scan.
+- A goal cell must lie inside `goal_margin_radius` and `goal_margin_theta`. The node defaults are 0.2 m and 10 degrees. Many `value_iteration` launch files override those to 0.3 m and 15 degrees.
+- The same six motions are shipped: 0.3 m forward, 0.2 m back, ±20 degrees, and ±20 degrees with 0.2 m forward.
+- Free cells cost 1 second to enter. Cells within `safety_radius` (0.2 m) cost an extra `safety_radius_penalty` (30 seconds).
+- A laser hit inside 1 m adds a local penalty of 2048 seconds, and cells along the beam have that penalty halved.
+- `/cmd_vel` repeats the chosen step. It is not a smooth velocity.
+
+Different in this package:
+
+| | `value_iteration` | `value_iteration2` | this package |
+|---|---|---|---|
+| ROS | ROS 1 | ROS 2 | ROS 2 |
+| Goal input | Action `value_iteration/ViAction` | `/goal_pose` | `/goal_pose` |
+| Map service | `static_map`, or `cost_map` when `map_type` is `cost` | `/map_server/map`, or `/cost_map` for a cost grid | `/map_server/map` only. Cell `0` is free |
+| Value output | `policy` and `value` services (`grid_map_msgs/GetGridMap`) | `/value_function` occupancy grid, every 1.5 s | `/value_function` occupancy grid, every 1.5 s |
+| Actions | `action_list` parameter. The count can change | Six actions fixed in the source. The `action_list` in its YAML is commented out | `action_list` in `config/params.yaml`. The count can change, up to 127 |
+| Threads | `thread_num`, default 4 | `global_thread_num`, default 1 in code and 2 in its YAML. `local_thread_num` is in the YAML and is never read | `global_thread_num`, default 1 without a file and 2 in `params.yaml`. `0` uses every logical core. There is no `local_thread_num` |
+| When solving starts | The field is swept continuously in the background, including before a goal | Same continuous sweep. Threads start toward the origin before any goal | Solving starts when `/goal_pose` arrives, and runs until that goal's field stops changing |
+| Laser update | A separate thread keeps sweeping only the 1 m window, even when no new scan arrives. `local_xy_range` is fixed at 1 m | Same one local thread and the same fixed 1 m window | A scan that changes a penalty starts an update from those cells. The update may leave the window, and it stops when that change settles. `local_xy_range` is a parameter |
+| Scan samples | Every range in the message | Every range in the message | Drops non-finite ranges and ranges outside the scan's reported limits. Subscription uses sensor-data QoS |
+| No action at the current cell | `/cmd_vel` is published only while `online` is true and an action exists | A zero command is published while idling. A cell with no action publishes nothing, so the previous command can remain | A zero command is published, so the robot waits |
+| YAML keys `gthread_num`, `gsafety_*`, `ggoal_*`, `gmap_type` | Not used | Present in `params.yaml` and not read by the node | Not used. The names this node reads are listed under [Parameters](#parameters) |
+
+`map_type: cost` exists only in the earlier packages. A cost grid gives each free cell its own immediate cost, and cells with value 255 are blocked. This node does not read that grid.
+
 ## License
 
 BSD-3-Clause. Copyright (c) 2026, nop and CIT autonomous robot laboratory.
