@@ -25,11 +25,13 @@
 #include "geometry_msgs/msg/twist.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/srv/get_map.hpp"
+#include "rclcpp/exceptions.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "tf2/exceptions.h"
 #include "tf2/time.h"
 #include "tf2/utils.h"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
 
@@ -104,33 +106,43 @@ class ViNode : public rclcpp::Node {
   void init() {
     load_actions();
     while (rclcpp::ok()) {
-      auto client = create_client<nav_msgs::srv::GetMap>("/map_server/map");
-      if (!client->wait_for_service(std::chrono::seconds(1))) {
+      try {
+        auto client = create_client<nav_msgs::srv::GetMap>("/map_server/map");
+        if (!client->wait_for_service(std::chrono::seconds(1))) {
+          if (!rclcpp::ok()) {
+            return;
+          }
+          RCLCPP_INFO(get_logger(), "waiting for /map_server/map");
+          continue;
+        }
+        auto request = std::make_shared<nav_msgs::srv::GetMap::Request>();
+        auto future = client->async_send_request(request);
+        if (rclcpp::spin_until_future_complete(get_node_base_interface(), future) !=
+            rclcpp::FutureReturnCode::SUCCESS) {
+          if (!rclcpp::ok()) {
+            return;
+          }
+          RCLCPP_ERROR(get_logger(), "map service call failed");
+          continue;
+        }
+        const auto map = future.get()->map;
+        std::vector<std::int8_t> occupancy(map.data.begin(), map.data.end());
+        const auto &rotation = map.info.origin.orientation;
+        if (planner_.load_map(static_cast<int>(map.info.width), static_cast<int>(map.info.height),
+                              map.info.resolution, map.info.origin.position.x,
+                              map.info.origin.position.y, rotation.x, rotation.y, rotation.z,
+                              rotation.w, occupancy, theta_cells_, safety_radius_, safety_penalty_,
+                              goal_margin_radius_, goal_margin_theta_)) {
+          break;
+        }
+        RCLCPP_ERROR(get_logger(), "rejected occupancy grid");
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+      } catch (const rclcpp::exceptions::RCLError &) {
         if (!rclcpp::ok()) {
           return;
         }
-        RCLCPP_INFO(get_logger(), "waiting for /map_server/map");
-        continue;
+        throw;
       }
-      auto request = std::make_shared<nav_msgs::srv::GetMap::Request>();
-      auto future = client->async_send_request(request);
-      if (rclcpp::spin_until_future_complete(get_node_base_interface(), future) !=
-          rclcpp::FutureReturnCode::SUCCESS) {
-        RCLCPP_ERROR(get_logger(), "map service call failed");
-        continue;
-      }
-      const auto map = future.get()->map;
-      std::vector<std::int8_t> occupancy(map.data.begin(), map.data.end());
-      const auto &rotation = map.info.origin.orientation;
-      if (planner_.load_map(static_cast<int>(map.info.width), static_cast<int>(map.info.height),
-                            map.info.resolution, map.info.origin.position.x,
-                            map.info.origin.position.y, rotation.x, rotation.y, rotation.z,
-                            rotation.w, occupancy, theta_cells_, safety_radius_, safety_penalty_,
-                            goal_margin_radius_, goal_margin_theta_)) {
-        break;
-      }
-      RCLCPP_ERROR(get_logger(), "rejected occupancy grid");
-      std::this_thread::sleep_for(std::chrono::seconds(1));
     }
     if (!online_ || !rclcpp::ok()) {
       return;
@@ -399,8 +411,18 @@ class ViNode : public rclcpp::Node {
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<value_iteration3::ViNode>();
-  node->init();
-  rclcpp::spin(node);
+  try {
+    node->init();
+    if (rclcpp::ok()) {
+      rclcpp::spin(node);
+    }
+  } catch (const rclcpp::exceptions::RCLError &) {
+    if (rclcpp::ok()) {
+      node.reset();
+      rclcpp::shutdown();
+      throw;
+    }
+  }
   node.reset();
   rclcpp::shutdown();
   return 0;
