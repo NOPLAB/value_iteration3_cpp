@@ -54,16 +54,16 @@ struct Scan {
 class ViNode : public rclcpp::Node {
  public:
   ViNode() : rclcpp::Node("vi_node"), planner_(0), global_(planner_) {
-    online_ = declare_parameter<bool>("online", true);
+    online_ = declare_parameter<bool>("online", false);
     theta_cells_ = declare_parameter<int>("theta_cell_num", 60);
     safety_radius_ = declare_parameter<double>("safety_radius", 0.2);
     safety_penalty_ = declare_parameter<double>("safety_radius_penalty", 30.0);
-    goal_margin_radius_ = declare_parameter<double>("goal_margin_radius", 0.3);
-    goal_margin_theta_ = declare_parameter<int>("goal_margin_theta", 15);
+    goal_margin_radius_ = declare_parameter<double>("goal_margin_radius", 0.2);
+    goal_margin_theta_ = declare_parameter<int>("goal_margin_theta", 10);
     cost_threshold_ = declare_parameter<int>("cost_drawing_threshold", 60);
     local_range_ = declare_parameter<double>("local_xy_range", 1.0);
     declare_parameter<std::string>("config_file", "");
-    const int threads = declare_parameter<int>("global_thread_num", 0);
+    const int threads = declare_parameter<int>("global_thread_num", 1);
     planner_.set_thread_num(threads);
     local_ = std::make_unique<LocalPlanner>(planner_, local_range_);
     planner_.set_logger([this](const std::string &text) {
@@ -358,12 +358,12 @@ class ViNode : public rclcpp::Node {
   Planner planner_;
   GlobalPlanner global_;
   std::unique_ptr<LocalPlanner> local_;
-  bool online_ = true;
+  bool online_ = false;
   int theta_cells_ = 60;
   double safety_radius_ = 0.2;
   double safety_penalty_ = 30.0;
-  double goal_margin_radius_ = 0.3;
-  int goal_margin_theta_ = 15;
+  double goal_margin_radius_ = 0.2;
+  int goal_margin_theta_ = 10;
   int cost_threshold_ = 60;
   double local_range_ = 1.0;
 
