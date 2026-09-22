@@ -8,3 +8,25 @@
     goal_margin_radius: 0.3
     goal_margin_theta: 15
     cost_drawing_threshold: 60
+    local_xy_range: 1.0
+
+# Edited here. The length of this list is the number of actions.
+action_list:
+  - name: forward
+    onestep_forward_m: 0.3
+    onestep_rotation_deg: 0.0
+  - name: back
+    onestep_forward_m: -0.2
+    onestep_rotation_deg: 0.0
+  - name: right
+    onestep_forward_m: 0.0
+    onestep_rotation_deg: -20.0
+  - name: rightfw
+    onestep_forward_m: 0.2
+    onestep_rotation_deg: -20.0
+  - name: left
+    onestep_forward_m: 0.0
+    onestep_rotation_deg: 20.0
+  - name: leftfw
+    onestep_forward_m: 0.2
+    onestep_rotation_deg: 20.0

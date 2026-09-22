@@ -1,10 +1,15 @@
 // SPDX-FileCopyrightText: 2026 nop and CIT autonomous robot laboratory
 // SPDX-License-Identifier: BSD-3-Clause
 
+#include "value_iteration3/actions.hpp"
+#include "value_iteration3/global_planner.hpp"
+#include "value_iteration3/local_planner.hpp"
 #include "value_iteration3/planner.hpp"
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -48,6 +53,27 @@ bool load(Planner &planner, int threads) {
 }  // namespace
 
 int planner_self_test() {
+  const std::string list_path = "action_list_test.yaml";
+  {
+    std::ofstream out(list_path);
+    out << "/**:\n  ros__parameters:\n    online: true\n\naction_list:\n"
+           "  - name: right\n    onestep_forward_m: 0.0\n    onestep_rotation_deg: -20.0\n"
+           "  - name: left\n    onestep_forward_m: 0.0\n    onestep_rotation_deg: 20.0\n"
+           "  - name: forward\n    onestep_forward_m: 0.3\n    onestep_rotation_deg: 0.0\n";
+  }
+  const ActionList parsed = read_action_list(list_path);
+  expect(parsed.error.empty(), parsed.error.empty() ? "action list" : parsed.error);
+  expect(parsed.actions.size() == 3, "action count");
+  if (parsed.actions.size() == 3) {
+    expect(parsed.actions[0].name == "right" && parsed.actions[0].rotate_deg == -20.0, "right");
+    expect(parsed.actions[1].name == "left" && parsed.actions[1].forward_m == 0.0, "left");
+    expect(parsed.actions[2].forward_m == 0.3, "forward");
+  }
+  Planner custom(1);
+  expect(custom.set_actions(parsed.actions), "install action list");
+  expect(!custom.set_actions({}), "reject an empty action list");
+  std::remove(list_path.c_str());
+
   Planner one(1);
   Planner two(2);
   expect(load(one, 1), "load 1 thread");
@@ -57,10 +83,12 @@ int planner_self_test() {
   }
 
   std::atomic<std::uint32_t> epoch{1};
-  one.prepare_goal(0.10, 0.10, 0);
-  two.prepare_goal(0.10, 0.10, 0);
-  const SolveResult first = one.solve(epoch, 1);
-  const SolveResult second = two.solve(epoch, 1);
+  GlobalPlanner global_one(one);
+  GlobalPlanner global_two(two);
+  global_one.prepare_goal(0.10, 0.10, 0);
+  global_two.prepare_goal(0.10, 0.10, 0);
+  const SolveResult first = global_one.solve(epoch, 1);
+  const SolveResult second = global_two.solve(epoch, 1);
   expect(first.converged, "1 thread converged");
   expect(second.converged, "2 threads converged");
   expect(one.audit().empty(), "1 thread " + one.audit());
@@ -84,10 +112,13 @@ int planner_self_test() {
   }
 
   const std::vector<std::uint64_t> before = left ? left->cost : std::vector<std::uint64_t>{};
-  one.set_window(0.4, 0.1);
-  const bool painted = one.apply_scan({0.35f}, 0.0f, 0.0f, 0.0f, 10.0f, 0.4, 0.1, 0.0);
+  LocalPlanner local(one, 1.0);
+  const LocalPlanner::Command corner =
+      local.command((kWidth - 1 + 0.5) * 0.05, (kHeight - 1 + 0.5) * 0.05, 0.0);
+  expect(corner.have_action, "local command at the far corner");
+  const bool painted = local.apply_scan({0.35f}, 0.0f, 0.0f, 0.0f, 10.0f, 0.4, 0.1, 0.0);
   expect(painted, "scan changes a penalty");
-  const SolveResult repaired = one.propagate(epoch, 1);
+  const SolveResult repaired = local.update(epoch, 1);
   expect(repaired.converged, "penalty update converged");
   expect(one.audit().empty(), "after scan " + one.audit());
   const auto after = one.view();
@@ -107,7 +138,7 @@ int planner_self_test() {
   }
 
   epoch.store(2);
-  const SolveResult cancelled = one.solve(epoch, 1);
+  const SolveResult cancelled = global_one.solve(epoch, 1);
   expect(cancelled.cancelled, "a new request cancels the running solve");
 
   if (failures == 0) {

@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -18,6 +19,8 @@
 namespace value_iteration3 {
 
 int planner_self_test();
+class GlobalPlanner;
+class LocalPlanner;
 
 struct Scale {
   static constexpr unsigned prob_base_bit = 18;
@@ -63,14 +66,15 @@ struct SolveResult {
   std::uint64_t updates = 0;
 };
 
-// One map, one goal, one value function.
-// prepare_goal / solve / apply_scan / propagate are called from a single worker.
-// view() is safe from other threads.
+// Map, actions, and the value field. One sweep updates that field.
+// view() is safe from other threads. Sweeps are called from one worker.
 class Planner {
  public:
   explicit Planner(int thread_num = 0);
   void set_thread_num(int thread_num);
   void set_logger(std::function<void(const std::string &)> logger);
+  // Replaces the motion set. Call it before load_map. At most 127 actions.
+  bool set_actions(std::vector<Action> actions);
 
   bool load_map(int width, int height, double resolution, double origin_x,
                 double origin_y, double qx, double qy, double qz, double qw,
@@ -78,22 +82,13 @@ class Planner {
                 double safety_radius, double safety_penalty,
                 double goal_margin_radius, int goal_margin_theta_deg);
 
-  void prepare_goal(double x, double y, int yaw_deg);
-  SolveResult solve(const std::atomic<std::uint32_t> &epoch, std::uint32_t ticket);
-
-  void set_window(double x, double y);
-  // Returns true when a cell penalty actually changed.
-  bool apply_scan(const std::vector<float> &ranges, float angle_min,
-                  float angle_increment, float range_min, float range_max,
-                  double x, double y, double yaw);
-  SolveResult propagate(const std::atomic<std::uint32_t> &epoch,
-                        std::uint32_t ticket);
-
   std::shared_ptr<const View> view() const;
   const std::vector<Action> &actions() const { return actions_; }
 
  private:
   friend int planner_self_test();
+  friend class GlobalPlanner;
+  friend class LocalPlanner;
 
   struct Bucket {
     std::int64_t offset;
@@ -105,18 +100,14 @@ class Planner {
   void allocate_field();
   void fill_cp(std::uint64_t value);
   void zero_masks();
-  bool heading_is_goal(int ix, int iy, int it) const;
-  bool in_window(int ix, int iy) const;
   std::vector<std::pair<int, int>> dilate(
       const std::vector<std::pair<int, int>> &cells) const;
-  bool write_local(int ix, int iy, std::uint64_t neu);
   std::uint64_t action_cost(int action, int theta, std::int64_t col) const;
   std::string audit() const;
   std::uint64_t compute_phase(int worker, bool all_headings);
   SolveResult run(bool all_headings_first, const std::atomic<std::uint32_t> &epoch,
                   std::uint32_t ticket);
   void publish();
-  void warn_unreached() const;
   std::int64_t pad_col(int ix, int iy) const;
   std::size_t index_of(int ix, int iy, int it) const;
   std::size_t mask_index(int ix, int iy) const;
@@ -176,14 +167,36 @@ class Planner {
   std::atomic<std::size_t> cursor_{0};
   std::atomic<std::uint64_t> updates_{0};
 
-  int win_x0_ = 0;
-  int win_x1_ = -1;
-  int win_y0_ = 0;
-  int win_y1_ = -1;
-
   mutable std::mutex view_mu_;
   std::shared_ptr<const View> view_;
 };
+
+template <class F>
+void Planner::for_rows(F fn) const {
+  int parties = thread_num_;
+  if (parties > ny_) {
+    parties = ny_;
+  }
+  if (parties <= 1) {
+    fn(0, ny_);
+    return;
+  }
+  std::vector<std::thread> threads;
+  threads.reserve(static_cast<std::size_t>(parties));
+  const int base = ny_ / parties;
+  const int extra = ny_ % parties;
+  int y = 0;
+  for (int i = 0; i < parties; ++i) {
+    const int height = base + (i < extra ? 1 : 0);
+    const int y0 = y;
+    const int y1 = y + height;
+    y = y1;
+    threads.emplace_back([fn, y0, y1] { fn(y0, y1); });
+  }
+  for (auto &thread : threads) {
+    thread.join();
+  }
+}
 
 }  // namespace value_iteration3
 

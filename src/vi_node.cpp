@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: 2026 nop and CIT autonomous robot laboratory
 // SPDX-License-Identifier: BSD-3-Clause
 
+#include "value_iteration3/actions.hpp"
+#include "value_iteration3/global_planner.hpp"
+#include "value_iteration3/local_planner.hpp"
 #include "value_iteration3/planner.hpp"
 
 #include <atomic>
@@ -8,12 +11,15 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include "ament_index_cpp/get_package_share_directory.hpp"
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/twist.hpp"
@@ -43,23 +49,11 @@ struct Scan {
   double yaw;
 };
 
-int heading_index(double yaw, int t_resolution_deg) {
-  const int degrees = static_cast<int>(180.0 * yaw / kPi);
-  int wrapped = (degrees + 360 * 100) % 360;
-  if (wrapped < 0) {
-    wrapped += 360;
-  }
-  if (t_resolution_deg <= 0) {
-    return 0;
-  }
-  return wrapped / t_resolution_deg;
-}
-
 }  // namespace
 
 class ViNode : public rclcpp::Node {
  public:
-  ViNode() : rclcpp::Node("vi_node"), planner_(0) {
+  ViNode() : rclcpp::Node("vi_node"), planner_(0), global_(planner_) {
     online_ = declare_parameter<bool>("online", true);
     theta_cells_ = declare_parameter<int>("theta_cell_num", 60);
     safety_radius_ = declare_parameter<double>("safety_radius", 0.2);
@@ -67,8 +61,11 @@ class ViNode : public rclcpp::Node {
     goal_margin_radius_ = declare_parameter<double>("goal_margin_radius", 0.3);
     goal_margin_theta_ = declare_parameter<int>("goal_margin_theta", 15);
     cost_threshold_ = declare_parameter<int>("cost_drawing_threshold", 60);
+    local_range_ = declare_parameter<double>("local_xy_range", 1.0);
+    declare_parameter<std::string>("config_file", "");
     const int threads = declare_parameter<int>("global_thread_num", 0);
     planner_.set_thread_num(threads);
+    local_ = std::make_unique<LocalPlanner>(planner_, local_range_);
     planner_.set_logger([this](const std::string &text) {
       RCLCPP_INFO(get_logger(), "%s", text.c_str());
     });
@@ -105,6 +102,7 @@ class ViNode : public rclcpp::Node {
   }
 
   void init() {
+    load_actions();
     while (rclcpp::ok()) {
       auto client = create_client<nav_msgs::srv::GetMap>("/map_server/map");
       if (!client->wait_for_service(std::chrono::seconds(1))) {
@@ -141,6 +139,36 @@ class ViNode : public rclcpp::Node {
   }
 
  private:
+  void load_actions() {
+    std::string path = get_parameter("config_file").as_string();
+    if (path.empty()) {
+      try {
+        path = ament_index_cpp::get_package_share_directory("value_iteration3") +
+               "/config/params.yaml";
+      } catch (const std::exception &ex) {
+        RCLCPP_WARN(get_logger(), "action list: %s", ex.what());
+        return;
+      }
+    }
+    const ActionList list = read_action_list(path);
+    if (!list.error.empty()) {
+      RCLCPP_ERROR(get_logger(), "%s", list.error.c_str());
+      return;
+    }
+    if (!planner_.set_actions(list.actions)) {
+      RCLCPP_ERROR(get_logger(), "rejected %zu actions", list.actions.size());
+      return;
+    }
+    std::string names;
+    for (const Action &action : planner_.actions()) {
+      if (!names.empty()) {
+        names += ", ";
+      }
+      names += action.name;
+    }
+    RCLCPP_INFO(get_logger(), "actions (%zu): %s", planner_.actions().size(), names.c_str());
+  }
+
   void on_goal(const geometry_msgs::msg::PoseStamped::ConstSharedPtr &msg) {
     const auto &q = msg->pose.orientation;
     const double yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
@@ -216,21 +244,14 @@ class ViNode : public rclcpp::Node {
     }
 
     geometry_msgs::msg::Twist command;
-    const auto field = planner_.view();
-    if (!idling && have_pose && field && field->resolution > 0.0) {
-      const int ix = static_cast<int>(std::floor((x - field->origin_x) / field->resolution));
-      const int iy = static_cast<int>(std::floor((y - field->origin_y) / field->resolution));
-      const int it = heading_index(yaw, field->t_resolution_deg);
-      if (ix >= 0 && iy >= 0 && ix < field->nx && iy < field->ny && it >= 0 && it < field->nt) {
-        const std::size_t cell = field->index(ix, iy, it);
-        if (field->final_state[cell]) {
-          std::lock_guard<std::mutex> lock(mu_);
-          idling_ = true;
-        } else if (field->action[cell] >= 0) {
-          const Action &action = planner_.actions()[static_cast<std::size_t>(field->action[cell])];
-          command.linear.x = action.forward_m;
-          command.angular.z = action.rotate_deg * kPi / 180.0;
-        }
+    if (!idling && have_pose && local_) {
+      const LocalPlanner::Command chosen = local_->command(x, y, yaw);
+      if (chosen.arrived) {
+        std::lock_guard<std::mutex> lock(mu_);
+        idling_ = true;
+      } else if (chosen.have_action) {
+        command.linear.x = chosen.linear_x;
+        command.angular.z = chosen.angular_z;
       }
     }
     if (pub_cmd_) {
@@ -313,21 +334,20 @@ class ViNode : public rclcpp::Node {
       }
 
       if (have_goal) {
-        planner_.prepare_goal(goal_x, goal_y, goal_yaw);
-        const SolveResult result = planner_.solve(epoch_, ticket);
+        global_.prepare_goal(goal_x, goal_y, goal_yaw);
+        const SolveResult result = global_.solve(epoch_, ticket);
         ready = !result.cancelled;
         continue;
       }
 
       bool changed = false;
       for (const Scan &scan : scans) {
-        planner_.set_window(scan.x, scan.y);
-        changed = planner_.apply_scan(scan.ranges, scan.angle_min, scan.angle_increment,
-                                      scan.range_min, scan.range_max, scan.x, scan.y, scan.yaw) ||
+        changed = local_->apply_scan(scan.ranges, scan.angle_min, scan.angle_increment,
+                                     scan.range_min, scan.range_max, scan.x, scan.y, scan.yaw) ||
                   changed;
       }
       if (changed) {
-        const SolveResult result = planner_.propagate(epoch_, ticket);
+        const SolveResult result = local_->update(epoch_, ticket);
         if (result.cancelled) {
           ready = false;
         }
@@ -336,6 +356,8 @@ class ViNode : public rclcpp::Node {
   }
 
   Planner planner_;
+  GlobalPlanner global_;
+  std::unique_ptr<LocalPlanner> local_;
   bool online_ = true;
   int theta_cells_ = 60;
   double safety_radius_ = 0.2;
@@ -343,6 +365,7 @@ class ViNode : public rclcpp::Node {
   double goal_margin_radius_ = 0.3;
   int goal_margin_theta_ = 15;
   int cost_threshold_ = 60;
+  double local_range_ = 1.0;
 
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr pub_cmd_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr pub_value_;
