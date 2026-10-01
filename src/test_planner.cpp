@@ -74,6 +74,26 @@ int planner_self_test() {
   expect(!custom.set_actions({}), "reject an empty action list");
   std::remove(list_path.c_str());
 
+  // Cost grids preserve all eight bits and already include obstacle inflation.
+  Planner costs(1);
+  const std::vector<std::int8_t> raw{0, 1, 100, 127, -128, -56, -2, -1};
+  expect(costs.load_map(8, 1, 0.1, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0, raw,
+                        12, 10.0, 999.0, 0.3, 30, MapType::Cost), "load raw costs");
+  for (std::size_t i = 0; i < raw.size(); ++i) {
+    const auto value = static_cast<std::uint8_t>(raw[i]);
+    expect(costs.free_[i] == (value != 255), "raw cost traversability");
+    expect(costs.static_pen_[i] == (value == 255 ? 0 : value * Scale::prob_base),
+           "raw cost without safety inflation or base cost");
+  }
+  Planner occupancy(1);
+  expect(occupancy.load_map(8, 1, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, raw,
+                            12, 0.0, 30.0, 0.3, 30), "default occupancy mode");
+  for (std::size_t i = 0; i < raw.size(); ++i) {
+    expect(occupancy.free_[i] == (raw[i] == 0), "occupancy only accepts zero");
+  }
+  expect(!costs.load_map(8, 1, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, {1},
+                         12, 0.0, 0.0, 0.3, 30, MapType::Cost), "reject short cost grid");
+
   Planner one(1);
   Planner two(2);
   expect(load(one, 1), "load 1 thread");
@@ -91,6 +111,33 @@ int planner_self_test() {
   const SolveResult second = global_two.solve(epoch, 1);
   expect(first.converged, "1 thread converged");
   expect(second.converged, "2 threads converged");
+  Planner weighted(1);
+  auto weighted_map = make_map();
+  for (auto &cell : weighted_map) {
+    cell = cell == 0 ? 4 : -1;
+  }
+  expect(weighted.load_map(kWidth, kHeight, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+                           weighted_map, 60, 0.2, 30.0, 0.3, 15, MapType::Cost),
+         "load weighted map");
+  GlobalPlanner weighted_global(weighted);
+  weighted_global.prepare_goal(0.10, 0.10, 0);
+  expect(weighted_global.solve(epoch, 1).converged, "weighted map converged");
+  expect(weighted.audit().empty(), "weighted field audit");
+  const auto weighted_view = weighted.view();
+  expect(weighted_view != nullptr, "weighted view");
+  if (weighted_view) {
+    expect(weighted_view->cost[weighted_view->index(kWidth - 1, kHeight - 1, 0)] <
+               Scale::max_cost, "weighted far cell reached");
+    expect(weighted_view->cost[weighted_view->index(kPocketX, kPocketY, 0)] ==
+               Scale::max_cost, "cost grid sealed cell stays blocked");
+    for (std::size_t xy = 0; xy < weighted.static_pen_.size(); ++xy) {
+      if (weighted.free_[xy]) {
+        expect(weighted.pen_[weighted.pad_col(static_cast<int>(xy % kWidth),
+                                             static_cast<int>(xy / kWidth))] ==
+                   4 * Scale::prob_base, "solver uses raw static cost");
+      }
+    }
+  }
   expect(one.audit().empty(), "1 thread " + one.audit());
   expect(two.audit().empty(), "2 threads " + two.audit());
 

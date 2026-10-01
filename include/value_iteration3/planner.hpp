@@ -18,6 +18,8 @@
 
 namespace value_iteration3 {
 
+enum class MapType { Occupancy, Cost };
+
 int planner_self_test();
 class GlobalPlanner;
 class LocalPlanner;
@@ -80,7 +82,8 @@ class Planner {
                 double origin_y, double qx, double qy, double qz, double qw,
                 const std::vector<std::int8_t> &occupancy, int theta_cells,
                 double safety_radius, double safety_penalty,
-                double goal_margin_radius, int goal_margin_theta_deg);
+                double goal_margin_radius, int goal_margin_theta_deg,
+                MapType map_type = MapType::Occupancy);
 
   std::shared_ptr<const View> view() const;
   const std::vector<Action> &actions() const { return actions_; }

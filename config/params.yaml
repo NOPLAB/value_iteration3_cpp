@@ -1,6 +1,7 @@
 /**:
   ros__parameters:
     online: true
+    map_type: occupancy
     global_thread_num: 2
     theta_cell_num: 60
     safety_radius: 0.2

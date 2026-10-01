@@ -43,7 +43,22 @@ install(TARGETS vi_node DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
-  add_test(NAME planner_test COMMAND planner_test)
+  find_package(ament_cmake_test REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
+  find_package(ament_cmake_cppcheck REQUIRED)
+  find_package(ament_cmake_lint_cmake REQUIRED)
+  find_package(ament_cmake_flake8 REQUIRED)
+  find_package(ament_cmake_xmllint REQUIRED)
+  ament_add_test(planner_test COMMAND "$<TARGET_FILE:planner_test>"
+    GENERATE_RESULT_FOR_RETURN_CODE_ZERO TIMEOUT 180)
+  ament_add_pytest_test(map_service_test test/test_map_service.py TIMEOUT 90)
+  # Ubuntu 22.04 ships cppcheck 2.7; run its analysis rather than skip it.
+  ament_cppcheck()
+  set_tests_properties(cppcheck PROPERTIES
+    ENVIRONMENT "AMENT_CPPCHECK_ALLOW_SLOW_VERSIONS=1")
+  ament_lint_cmake()
+  ament_flake8()
+  ament_xmllint()
 endif()
 
 ament_package()

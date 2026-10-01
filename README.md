@@ -8,7 +8,7 @@ Author: nop (noplab90@gmail.com). License: BSD-3-Clause. Copyright: nop and CIT 
 
 Before the node can drive:
 
-- A map server that serves `nav_msgs/GetMap` on `/map_server/map`. Cell value `0` is free. Any other value is occupied.
+- A map server that serves `nav_msgs/GetMap` on `/map_server/map` (the default). Cell value `0` is free. Any other value is occupied. For a raw cost grid, set `map_type: cost` and serve it on `/cost_map`.
 - A transform from `map` to `base_link`.
 - A `sensor_msgs/LaserScan` on `/scan`.
 - A base that accepts `geometry_msgs/Twist` on `/cmd_vel`.
@@ -20,7 +20,7 @@ The command is not a smooth velocity. While an action is selected, the node repu
 Place this directory in a workspace `src` folder, then:
 
 ```bash
-colcon build --packages-select value_iteration3
+colcon build --packages-select value_iteration3 --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash
 ros2 launch value_iteration3 vi.launch.py
 ```
@@ -33,12 +33,15 @@ Send a goal in the `map` frame on `/goal_pose` (`geometry_msgs/PoseStamped`). Th
 
 | Name | Type | Role |
 |---|---|---|
-| `/map_server/map` | `nav_msgs/GetMap` | Occupancy grid, read once at startup |
+| `/map_server/map` | `nav_msgs/GetMap` | Occupancy grid, read once at startup with `map_type: occupancy` |
+| `/cost_map` | `nav_msgs/GetMap` | Raw cost grid, read once at startup with `map_type: cost` |
 | `/goal_pose` | `geometry_msgs/PoseStamped` | Goal position and yaw in `map` |
 | `/scan` | `sensor_msgs/LaserScan` | Local obstacle update. Sensor data QoS |
 | `/cmd_vel` | `geometry_msgs/Twist` | Selected action, 10 Hz |
 | `/value_function` | `nav_msgs/OccupancyGrid` | Cost of the current heading |
 | `map` → `base_link` | TF | Robot pose |
+
+Set `map_type` to `cost` in `config/params.yaml`, or run `ros2 run value_iteration3 vi_node --ros-args -p map_type:=cost -p online:=true`. Each data byte is interpreted as unsigned: 0–254 is the immediate cost in seconds and 255 (signed -1) is blocked. For example, signed -2 represents cost 254. Cost grids already contain their desired inflation, so `safety_radius` and `safety_radius_penalty` apply only to occupancy mode. Invalid map types are rejected.
 
 Set `online` to `false` to load the map and publish nothing else. The launch file leaves it `true`.
 
@@ -64,6 +67,7 @@ Numeric defaults below are the values in `config/params.yaml`, which the launch 
 
 | Parameter | Default | Meaning |
 |---|---|---|
+| `map_type` | `occupancy` | `occupancy` selects `/map_server/map`; `cost` selects `/cost_map` |
 | `online` | `true` | Subscribe to the goal and the scan, and publish `/cmd_vel` |
 | `global_thread_num` | `2` | Threads used while solving. `0` uses all logical cores |
 | `theta_cell_num` | `60` | Number of heading bins |
@@ -105,6 +109,20 @@ action_list:
 
 The shipped list is six motions: 0.3 m forward, 0.2 m back, a turn of 20 degrees either way, and the same turn combined with 0.2 m forward.
 
+## ROS 2 tests and lint
+
+CI builds and tests on ROS 2 Humble / Ubuntu 22.04. From a sourced ROS workspace:
+
+```bash
+rosdep install --from-paths src --ignore-src --rosdistro humble -y
+colcon build --packages-select value_iteration3 --cmake-args -DCMAKE_BUILD_TYPE=Release
+source install/setup.bash
+colcon test --packages-select value_iteration3 --event-handlers console_direct+ --return-code-on-test-failure
+colcon test-result --verbose
+```
+
+Tests use `ament_cmake_test` and `ament_cmake_pytest`. The solver checks unsigned cost decoding, blocked cells, and unchanged occupancy behavior. ROS integration tests launch the installed node with real `nav_msgs/GetMap` services, check both service routes and map metadata, and verify that raw 254 is traversable while 255 is blocked. Lint uses ament cppcheck (C++ static analysis), flake8 (Python), lint_cmake, and xmllint. CI uploads their result files.
+
 ## Solver test
 
 This checks the solver without ROS. It needs a C++17 compiler and pthreads.
@@ -137,7 +155,7 @@ Different in this package:
 |---|---|---|---|
 | ROS | ROS 1 | ROS 2 | ROS 2 |
 | Goal input | Action `value_iteration/ViAction` | `/goal_pose` | `/goal_pose` |
-| Map service | `static_map`, or `cost_map` when `map_type` is `cost` | `/map_server/map`, or `/cost_map` for a cost grid | `/map_server/map` only. Cell `0` is free |
+| Map service | `static_map`, or `cost_map` when `map_type` is `cost` | `/map_server/map`, or `/cost_map` for a cost grid | `/map_server/map`, or `/cost_map` with `map_type: cost` |
 | Value output | `policy` and `value` services (`grid_map_msgs/GetGridMap`) | `/value_function` occupancy grid, every 1.5 s | `/value_function` occupancy grid, every 1.5 s |
 | Actions | `action_list` parameter. The count can change | Six actions fixed in the source. The `action_list` in its YAML is commented out | `action_list` in `config/params.yaml`. The count can change, up to 127 |
 | Threads | `thread_num`, default 4 | `global_thread_num`, default 1 in code and 2 in its YAML. `local_thread_num` is in the YAML and is never read | `global_thread_num`, default 1 without a file and 2 in `params.yaml`. `0` uses every logical core. There is no `local_thread_num` |
@@ -147,7 +165,7 @@ Different in this package:
 | No action at the current cell | `/cmd_vel` is published only while `online` is true and an action exists | A zero command is published while idling. A cell with no action publishes nothing, so the previous command can remain | A zero command is published, so the robot waits |
 | YAML keys `gthread_num`, `gsafety_*`, `ggoal_*`, `gmap_type` | Not used | Present in `params.yaml` and not read by the node | Not used. The names this node reads are listed under [Parameters](#parameters) |
 
-`map_type: cost` exists only in the earlier packages. A cost grid gives each free cell its own immediate cost, and cells with value 255 are blocked. This node does not read that grid.
+The cost-grid conversion matches `value_iteration2` (`ValueIterator::setMapWithCostGrid` and the raw-cost `State` constructor). Its upstream ROS 2 `/cost_map` service branch is commented out; this package implements that service path with ROS 2 clients. Cost mode uses the grid's immediate costs without occupancy safety inflation.
 
 ## License
 
