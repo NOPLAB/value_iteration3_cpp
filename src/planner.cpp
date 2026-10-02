@@ -351,7 +351,7 @@ bool Planner::load_map(int width, int height, double resolution, double origin_x
                        double qx, double qy, double qz, double qw,
                        const std::vector<std::int8_t> &occupancy, int theta_cells,
                        double safety_radius, double safety_penalty, double goal_margin_radius,
-                       int goal_margin_theta_deg) {
+                       int goal_margin_theta_deg, MapType map_type) {
   if (width <= 0 || height <= 0 || resolution < 0.0001 || theta_cells <= 0 || theta_cells > 64) {
     return false;
   }
@@ -386,6 +386,12 @@ bool Planner::load_map(int width, int height, double resolution, double origin_x
   for (int y = 0; y < ny_; ++y) {
     for (int x = 0; x < nx_; ++x) {
       const std::size_t xy = static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * nx_;
+      if (map_type == MapType::Cost) {
+        const auto cost = static_cast<std::uint8_t>(occupancy[xy]);
+        free_[xy] = cost != 255;
+        static_pen_[xy] = free_[xy] ? static_cast<std::uint64_t>(cost) * Scale::prob_base : 0;
+        continue;
+      }
       if (occupancy[xy] != 0) {
         continue;
       }

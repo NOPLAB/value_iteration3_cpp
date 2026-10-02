@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -57,6 +58,13 @@ class ViNode : public rclcpp::Node {
  public:
   ViNode() : rclcpp::Node("vi_node"), planner_(0), global_(planner_) {
     online_ = declare_parameter<bool>("online", false);
+    const auto map_type = declare_parameter<std::string>("map_type", "occupancy");
+    if (map_type == "cost") {
+      map_type_ = MapType::Cost;
+      map_service_ = "/cost_map";
+    } else if (map_type != "occupancy") {
+      throw std::invalid_argument("map_type must be occupancy or cost");
+    }
     theta_cells_ = declare_parameter<int>("theta_cell_num", 60);
     safety_radius_ = declare_parameter<double>("safety_radius", 0.2);
     safety_penalty_ = declare_parameter<double>("safety_radius_penalty", 30.0);
@@ -107,12 +115,12 @@ class ViNode : public rclcpp::Node {
     load_actions();
     while (rclcpp::ok()) {
       try {
-        auto client = create_client<nav_msgs::srv::GetMap>("/map_server/map");
+        auto client = create_client<nav_msgs::srv::GetMap>(map_service_);
         if (!client->wait_for_service(std::chrono::seconds(1))) {
           if (!rclcpp::ok()) {
             return;
           }
-          RCLCPP_INFO(get_logger(), "waiting for /map_server/map");
+          RCLCPP_INFO(get_logger(), "waiting for %s", map_service_.c_str());
           continue;
         }
         auto request = std::make_shared<nav_msgs::srv::GetMap::Request>();
@@ -132,7 +140,7 @@ class ViNode : public rclcpp::Node {
                               map.info.resolution, map.info.origin.position.x,
                               map.info.origin.position.y, rotation.x, rotation.y, rotation.z,
                               rotation.w, occupancy, theta_cells_, safety_radius_, safety_penalty_,
-                              goal_margin_radius_, goal_margin_theta_)) {
+                              goal_margin_radius_, goal_margin_theta_, map_type_)) {
           break;
         }
         RCLCPP_ERROR(get_logger(), "rejected occupancy grid");
@@ -371,6 +379,8 @@ class ViNode : public rclcpp::Node {
   GlobalPlanner global_;
   std::unique_ptr<LocalPlanner> local_;
   bool online_ = false;
+  MapType map_type_ = MapType::Occupancy;
+  std::string map_service_ = "/map_server/map";
   int theta_cells_ = 60;
   double safety_radius_ = 0.2;
   double safety_penalty_ = 30.0;
