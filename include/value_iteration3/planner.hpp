@@ -18,7 +18,8 @@
 
 namespace value_iteration3 {
 
-enum class MapType { Occupancy, Cost };
+// CostAdd: 1 s base cost plus the raw cell cost. CostReplace: the raw cell cost alone.
+enum class MapType { Occupancy, CostAdd, CostReplace };
 
 int planner_self_test();
 class GlobalPlanner;

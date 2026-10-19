@@ -13,7 +13,7 @@ import pytest
 import rclpy
 
 
-@pytest.mark.parametrize('mode', ['occupancy', 'cost'])
+@pytest.mark.parametrize('mode', ['occupancy', 'cost_add', 'cost_replace'])
 def test_map_service(mode):
     """Exercise the installed node against both actual ROS 2 GetMap services."""
     rclpy.init()
@@ -63,14 +63,15 @@ def test_map_service(mode):
                 goal.pose.orientation.w = 1.0
                 publisher.publish(goal)
                 goal_sent = True
-        assert calls == ['/cost_map' if mode == 'cost' else '/map_server/map']
+        cost_mode = mode != 'occupancy'
+        assert calls == ['/cost_map' if cost_mode else '/map_server/map']
         assert grids, 'no solved value function received'
         grid = grids[0]
         assert grid.info.width == 8 and grid.info.height == 8
         assert grid.info.origin.position.x == 2.0
         assert grid.info.origin.position.y == 3.0
         assert grid.data[63] == 100, '255 must stay blocked'
-        if mode == 'cost':
+        if cost_mode:
             assert grid.data[36] < 100, '254 must be traversable'
         else:
             assert grid.data[36] == 100, 'nonzero occupancy must stay blocked'

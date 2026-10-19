@@ -386,10 +386,12 @@ bool Planner::load_map(int width, int height, double resolution, double origin_x
   for (int y = 0; y < ny_; ++y) {
     for (int x = 0; x < nx_; ++x) {
       const std::size_t xy = static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * nx_;
-      if (map_type == MapType::Cost) {
+      if (map_type != MapType::Occupancy) {
         const auto cost = static_cast<std::uint8_t>(occupancy[xy]);
         free_[xy] = cost != 255;
-        static_pen_[xy] = free_[xy] ? static_cast<std::uint64_t>(cost) * Scale::prob_base : 0;
+        const std::uint64_t base = map_type == MapType::CostAdd ? Scale::prob_base : 0;
+        static_pen_[xy] =
+            free_[xy] ? base + static_cast<std::uint64_t>(cost) * Scale::prob_base : 0;
         continue;
       }
       if (occupancy[xy] != 0) {

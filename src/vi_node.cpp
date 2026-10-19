@@ -59,11 +59,11 @@ class ViNode : public rclcpp::Node {
   ViNode() : rclcpp::Node("vi_node"), planner_(0), global_(planner_) {
     online_ = declare_parameter<bool>("online", false);
     const auto map_type = declare_parameter<std::string>("map_type", "occupancy");
-    if (map_type == "cost") {
-      map_type_ = MapType::Cost;
+    if (map_type == "cost_add" || map_type == "cost_replace") {
+      map_type_ = map_type == "cost_add" ? MapType::CostAdd : MapType::CostReplace;
       map_service_ = "/cost_map";
     } else if (map_type != "occupancy") {
-      throw std::invalid_argument("map_type must be occupancy or cost");
+      throw std::invalid_argument("map_type must be occupancy, cost_add, or cost_replace");
     }
     theta_cells_ = declare_parameter<int>("theta_cell_num", 60);
     safety_radius_ = declare_parameter<double>("safety_radius", 0.2);

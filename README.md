@@ -8,7 +8,7 @@ Author: nop (noplab90@gmail.com). License: BSD-3-Clause. Copyright: nop and CIT 
 
 Before the node can drive:
 
-- A map server that serves `nav_msgs/GetMap` on `/map_server/map` (the default). Cell value `0` is free. Any other value is occupied. For a raw cost grid, set `map_type: cost` and serve it on `/cost_map`.
+- A map server that serves `nav_msgs/GetMap` on `/map_server/map` (the default). Cell value `0` is free. Any other value is occupied. For a raw cost grid, set `map_type: cost_add` or `map_type: cost_replace` and serve it on `/cost_map`.
 - A transform from `map` to `base_link`.
 - A `sensor_msgs/LaserScan` on `/scan`.
 - A base that accepts `geometry_msgs/Twist` on `/cmd_vel`.
@@ -34,14 +34,21 @@ Send a goal in the `map` frame on `/goal_pose` (`geometry_msgs/PoseStamped`). Th
 | Name | Type | Role |
 |---|---|---|
 | `/map_server/map` | `nav_msgs/GetMap` | Occupancy grid, read once at startup with `map_type: occupancy` |
-| `/cost_map` | `nav_msgs/GetMap` | Raw cost grid, read once at startup with `map_type: cost` |
+| `/cost_map` | `nav_msgs/GetMap` | Raw cost grid, read once at startup with `map_type: cost_add` or `cost_replace` |
 | `/goal_pose` | `geometry_msgs/PoseStamped` | Goal position and yaw in `map` |
 | `/scan` | `sensor_msgs/LaserScan` | Local obstacle update. Sensor data QoS |
 | `/cmd_vel` | `geometry_msgs/Twist` | Selected action, 10 Hz |
 | `/value_function` | `nav_msgs/OccupancyGrid` | Cost of the current heading |
 | `map` → `base_link` | TF | Robot pose |
 
-Set `map_type` to `cost` in `config/params.yaml`, or run `ros2 run value_iteration3 vi_node --ros-args -p map_type:=cost -p online:=true`. Each data byte is interpreted as unsigned: 0–254 is the immediate cost in seconds and 255 (signed -1) is blocked. For example, signed -2 represents cost 254. Cost grids already contain their desired inflation, so `safety_radius` and `safety_radius_penalty` apply only to occupancy mode. Invalid map types are rejected.
+Set `map_type` to `cost_add` or `cost_replace` in `config/params.yaml`, or run `ros2 run value_iteration3 vi_node --ros-args -p map_type:=cost_replace -p online:=true`. Each data byte is interpreted as unsigned: 0–254 is a cost in seconds and 255 (signed -1) is blocked. For example, signed -2 represents cost 254. The two modes differ in how that value is used:
+
+| `map_type` | Immediate cost of a free cell |
+|---|---|
+| `cost_add` | The 1 second base cost plus the cell value. A cell of `0` costs 1 second, as a free occupancy cell does |
+| `cost_replace` | The cell value alone. It replaces the 1 second base cost, so a cell of `0` costs nothing |
+
+Cost grids already contain their desired inflation, so `safety_radius` and `safety_radius_penalty` apply only to occupancy mode. Invalid map types are rejected, including the earlier ambiguous `cost`; use `cost_replace` for the behavior of `value_iteration`'s `cost`.
 
 Set `online` to `false` to load the map and publish nothing else. The launch file leaves it `true`.
 
@@ -67,7 +74,7 @@ Numeric defaults below are the values in `config/params.yaml`, which the launch 
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `map_type` | `occupancy` | `occupancy` selects `/map_server/map`; `cost` selects `/cost_map` |
+| `map_type` | `occupancy` | `occupancy` selects `/map_server/map`; `cost_add` and `cost_replace` select `/cost_map` |
 | `online` | `true` | Subscribe to the goal and the scan, and publish `/cmd_vel` |
 | `global_thread_num` | `2` | Threads used while solving. `0` uses all logical cores |
 | `theta_cell_num` | `60` | Number of heading bins |
@@ -155,7 +162,7 @@ Different in this package:
 |---|---|---|---|
 | ROS | ROS 1 | ROS 2 | ROS 2 |
 | Goal input | Action `value_iteration/ViAction` | `/goal_pose` | `/goal_pose` |
-| Map service | `static_map`, or `cost_map` when `map_type` is `cost` | `/map_server/map`, or `/cost_map` for a cost grid | `/map_server/map`, or `/cost_map` with `map_type: cost` |
+| Map service | `static_map`, or `cost_map` when `map_type` is `cost` | `/map_server/map`, or `/cost_map` for a cost grid | `/map_server/map`, or `/cost_map` with `map_type: cost_add` or `cost_replace` |
 | Value output | `policy` and `value` services (`grid_map_msgs/GetGridMap`) | `/value_function` occupancy grid, every 1.5 s | `/value_function` occupancy grid, every 1.5 s |
 | Actions | `action_list` parameter. The count can change | Six actions fixed in the source. The `action_list` in its YAML is commented out | `action_list` in `config/params.yaml`. The count can change, up to 127 |
 | Threads | `thread_num`, default 4 | `global_thread_num`, default 1 in code and 2 in its YAML. `local_thread_num` is in the YAML and is never read | `global_thread_num`, default 1 without a file and 2 in `params.yaml`. `0` uses every logical core. There is no `local_thread_num` |
@@ -165,7 +172,7 @@ Different in this package:
 | No action at the current cell | `/cmd_vel` is published only while `online` is true and an action exists | A zero command is published while idling. A cell with no action publishes nothing, so the previous command can remain | A zero command is published, so the robot waits |
 | YAML keys `gthread_num`, `gsafety_*`, `ggoal_*`, `gmap_type` | Not used | Present in `params.yaml` and not read by the node | Not used. The names this node reads are listed under [Parameters](#parameters) |
 
-The cost-grid conversion matches `value_iteration2` (`ValueIterator::setMapWithCostGrid` and the raw-cost `State` constructor). Its upstream ROS 2 `/cost_map` service branch is commented out; this package implements that service path with ROS 2 clients. Cost mode uses the grid's immediate costs without occupancy safety inflation.
+The cost-grid conversion matches `value_iteration2` (`ValueIterator::setMapWithCostGrid` and the raw-cost `State` constructor). Its upstream ROS 2 `/cost_map` service branch is commented out; this package implements that service path with ROS 2 clients. `cost_replace` keeps that conversion; `cost_add` adds the 1 second base cost to each free cell. Neither cost mode applies occupancy safety inflation.
 
 ## License
 

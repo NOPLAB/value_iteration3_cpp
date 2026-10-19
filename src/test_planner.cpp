@@ -78,12 +78,21 @@ int planner_self_test() {
   Planner costs(1);
   const std::vector<std::int8_t> raw{0, 1, 100, 127, -128, -56, -2, -1};
   expect(costs.load_map(8, 1, 0.1, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0, raw,
-                        12, 10.0, 999.0, 0.3, 30, MapType::Cost), "load raw costs");
+                        12, 10.0, 999.0, 0.3, 30, MapType::CostReplace), "load raw costs");
   for (std::size_t i = 0; i < raw.size(); ++i) {
     const auto value = static_cast<std::uint8_t>(raw[i]);
     expect(costs.free_[i] == (value != 255), "raw cost traversability");
     expect(costs.static_pen_[i] == (value == 255 ? 0 : value * Scale::prob_base),
            "raw cost without safety inflation or base cost");
+  }
+  Planner added(1);
+  expect(added.load_map(8, 1, 0.1, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0, raw,
+                        12, 10.0, 999.0, 0.3, 30, MapType::CostAdd), "load added costs");
+  for (std::size_t i = 0; i < raw.size(); ++i) {
+    const auto value = static_cast<std::uint8_t>(raw[i]);
+    expect(added.free_[i] == (value != 255), "added cost traversability");
+    expect(added.static_pen_[i] == (value == 255 ? 0 : (value + 1) * Scale::prob_base),
+           "added cost is the base cost plus the raw cost");
   }
   Planner occupancy(1);
   expect(occupancy.load_map(8, 1, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, raw,
@@ -92,7 +101,7 @@ int planner_self_test() {
     expect(occupancy.free_[i] == (raw[i] == 0), "occupancy only accepts zero");
   }
   expect(!costs.load_map(8, 1, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, {1},
-                         12, 0.0, 0.0, 0.3, 30, MapType::Cost), "reject short cost grid");
+                         12, 0.0, 0.0, 0.3, 30, MapType::CostReplace), "reject short cost grid");
 
   Planner one(1);
   Planner two(2);
@@ -117,7 +126,7 @@ int planner_self_test() {
     cell = cell == 0 ? 4 : -1;
   }
   expect(weighted.load_map(kWidth, kHeight, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-                           weighted_map, 60, 0.2, 30.0, 0.3, 15, MapType::Cost),
+                           weighted_map, 60, 0.2, 30.0, 0.3, 15, MapType::CostReplace),
          "load weighted map");
   GlobalPlanner weighted_global(weighted);
   weighted_global.prepare_goal(0.10, 0.10, 0);

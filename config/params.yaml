@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     online: true
-    map_type: occupancy
+    map_type: occupancy  # occupancy, cost_add, or cost_replace
     global_thread_num: 2
     theta_cell_num: 60
     safety_radius: 0.2
