@@ -26,9 +26,16 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_executable(vi_node src/vi_node.cpp)
-target_link_libraries(vi_node planner)
-ament_target_dependencies(vi_node
-  rclcpp ament_index_cpp nav_msgs geometry_msgs sensor_msgs tf2 tf2_ros tf2_geometry_msgs)
+target_link_libraries(vi_node PRIVATE
+  planner
+  rclcpp::rclcpp
+  ament_index_cpp::ament_index_cpp
+  ${nav_msgs_TARGETS}
+  ${geometry_msgs_TARGETS}
+  ${sensor_msgs_TARGETS}
+  tf2::tf2
+  tf2_ros::tf2_ros
+  tf2_geometry_msgs::tf2_geometry_msgs)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(vi_node PRIVATE -Wall -Wextra -Wpedantic)
 endif()
