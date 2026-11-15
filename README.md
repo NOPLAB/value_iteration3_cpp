@@ -1,76 +1,124 @@
 # value_iteration3
 
-A ROS 2 node that drives a robot to a goal by value iteration. It reads an occupancy grid, computes the cost of reaching the goal from every free cell and heading, and publishes the discrete action at the robot's current pose.
+[![Humble CI](https://img.shields.io/github/check-runs/NOPLAB/value_iteration3_cpp/main?nameFilter=ROS%202%20humble%20build%20and%20test%20%28ubuntu-24.04%29&label=Humble)](https://github.com/NOPLAB/value_iteration3_cpp/actions/workflows/ci.yaml?query=branch%3Amain)
+[![Jazzy CI](https://img.shields.io/github/check-runs/NOPLAB/value_iteration3_cpp/main?nameFilter=ROS%202%20jazzy%20build%20and%20test%20%28ubuntu-24.04%29&label=Jazzy)](https://github.com/NOPLAB/value_iteration3_cpp/actions/workflows/ci.yaml?query=branch%3Amain)
+[![Lyrical CI](https://img.shields.io/github/check-runs/NOPLAB/value_iteration3_cpp/main?nameFilter=ROS%202%20lyrical%20build%20and%20test%20%28ubuntu-24.04%29&label=Lyrical)](https://github.com/NOPLAB/value_iteration3_cpp/actions/workflows/ci.yaml?query=branch%3Amain)
 
-Author: nop (noplab90@gmail.com). License: BSD-3-Clause. Copyright: nop and CIT autonomous robot laboratory. See [License](#license).
+## Overview
 
-## What you need running
+ROS 2 navigation by value iteration. The node reads a grid map, computes the cost
+of reaching a goal from each free cell and heading, and publishes the selected
+discrete motion at the robot's current pose.
 
-Before the node can drive:
+It supports occupancy maps and raw cost grids, configurable motion actions,
+parallel global solving, and local obstacle updates from laser scans.
 
-- A map server that serves `nav_msgs/GetMap` on `/map_server/map` (the default). Cell value `0` is free. Any other value is occupied. For a raw cost grid, set `map_type: cost_add` or `map_type: cost_replace` and serve it on `/cost_map`.
-- A transform from `map` to `base_link`.
-- A `sensor_msgs/LaserScan` on `/scan`.
-- A base that accepts `geometry_msgs/Twist` on `/cmd_vel`.
+## Requirements
 
-The command is not a smooth velocity. While an action is selected, the node republishes that action at 10 Hz: `linear.x` is the action's forward step in meters, and `angular.z` is its rotation in radians. At the goal, and whenever the current cell has no action, it publishes zeros.
+CI covers these ROS 2 distributions on x86_64 and ARM64:
 
-## Build and run
+| ROS 2 | Container OS |
+| --- | --- |
+| Humble | Ubuntu 22.04 |
+| Jazzy | Ubuntu 24.04 |
+| Lyrical | Ubuntu 26.04 |
 
-Place this directory in a workspace `src` folder, then:
+Install ROS 2, `colcon`, and `rosdep`, and initialize rosdep before building.
+Package dependencies are declared in [package.xml](package.xml).
+
+Navigation also needs a map server, a `map -> base_link` transform, a laser scan,
+and a base that accepts the command format described under
+[ROS interfaces](#ros-interfaces).
+
+## Build
+
+The examples use Humble. Replace `humble` with `jazzy` or `lyrical` to use another
+supported distribution.
 
 ```bash
-colcon build --packages-select value_iteration3 --cmake-args -DCMAKE_BUILD_TYPE=Release
+source /opt/ros/humble/setup.bash
+mkdir -p ~/ros2_ws/src
+cd ~/ros2_ws/src
+git clone https://github.com/NOPLAB/value_iteration3_cpp.git
+cd ~/ros2_ws
+rosdep update --rosdistro "$ROS_DISTRO"
+rosdep install --from-paths src --ignore-src --rosdistro "$ROS_DISTRO" -y
+colcon build --packages-select value_iteration3 \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+```
+
+The repository is named `value_iteration3_cpp`; the ROS package is
+`value_iteration3`.
+
+## Run
+
+From the workspace root:
+
+```bash
 source install/setup.bash
 ros2 launch value_iteration3 vi.launch.py
 ```
 
-Send a goal in the `map` frame on `/goal_pose` (`geometry_msgs/PoseStamped`). The node solves from that pose, then starts publishing `/cmd_vel`. Solving can take seconds on a large map. The robot holds still until a policy exists.
+The launch file loads [config/params.yaml](config/params.yaml). Send a goal in the
+`map` frame on `/goal_pose` (`geometry_msgs/msg/PoseStamped`). Solving starts when
+a goal arrives and can take seconds on a large map. The robot waits until a
+policy is available.
 
-`/value_function` (`nav_msgs/OccupancyGrid`) shows the cost for the robot's current heading. The value is `0` at the goal and `100` at `cost_drawing_threshold` seconds or above. It is published about every 1.5 s.
+To use a raw cost grid without the launch file:
 
-## Topics and the map service
+```bash
+ros2 run value_iteration3 vi_node --ros-args \
+  -p map_type:=cost_replace -p online:=true
+```
+
+Set `online: false` to load the map without subscribing to goals or scans or
+publishing navigation results. Direct execution defaults to `false`; the shipped
+launch configuration sets it to `true`.
+
+## ROS interfaces
 
 | Name | Type | Role |
-|---|---|---|
-| `/map_server/map` | `nav_msgs/GetMap` | Occupancy grid, read once at startup with `map_type: occupancy` |
-| `/cost_map` | `nav_msgs/GetMap` | Raw cost grid, read once at startup with `map_type: cost_add` or `cost_replace` |
-| `/goal_pose` | `geometry_msgs/PoseStamped` | Goal position and yaw in `map` |
-| `/scan` | `sensor_msgs/LaserScan` | Local obstacle update. Sensor data QoS |
-| `/cmd_vel` | `geometry_msgs/Twist` | Selected action, 10 Hz |
-| `/value_function` | `nav_msgs/OccupancyGrid` | Cost of the current heading |
-| `map` → `base_link` | TF | Robot pose |
+| --- | --- | --- |
+| `/map_server/map` | `nav_msgs/srv/GetMap` | Occupancy map service; read once at startup |
+| `/cost_map` | `nav_msgs/srv/GetMap` | Raw cost map service; used in either cost mode |
+| `/goal_pose` | `geometry_msgs/msg/PoseStamped` | Goal position and yaw in `map` |
+| `/scan` | `sensor_msgs/msg/LaserScan` | Local obstacle updates; sensor-data QoS |
+| `/cmd_vel` | `geometry_msgs/msg/Twist` | Selected discrete action, repeated at 10 Hz |
+| `/value_function` | `nav_msgs/msg/OccupancyGrid` | Cost for the robot's current heading, about every 1.5 s |
+| `map -> base_link` | TF | Current robot pose |
 
-Set `map_type` to `cost_add` or `cost_replace` in `config/params.yaml`, or run `ros2 run value_iteration3 vi_node --ros-args -p map_type:=cost_replace -p online:=true`. Each data byte is interpreted as unsigned: 0–254 is a cost in seconds and 255 (signed -1) is blocked. For example, signed -2 represents cost 254. The two modes differ in how that value is used:
+**`/cmd_vel` carries discrete motion steps, not smooth velocities.**
+`linear.x` is the forward step in metres and `angular.z` is the rotation in
+radians. At the goal, or when no action exists at the current cell, the node
+publishes zeros.
+
+`/value_function` is `0` at the goal and saturates at `100` when the cost reaches
+`cost_drawing_threshold` seconds.
+
+## Configuration
+
+### Map modes
+
+Set `map_type` in [config/params.yaml](config/params.yaml):
 
 | `map_type` | Immediate cost of a free cell |
-|---|---|
-| `cost_add` | The 1 second base cost plus the cell value. A cell of `0` costs 1 second, as a free occupancy cell does |
-| `cost_replace` | The cell value alone. It replaces the 1 second base cost, so a cell of `0` costs nothing |
+| --- | --- |
+| `occupancy` | 1 second, plus occupancy safety penalties; only map value `0` is free |
+| `cost_add` | 1 second plus the raw cell value |
+| `cost_replace` | The raw cell value alone; a value of `0` costs nothing |
 
-Cost grids already contain their desired inflation, so `safety_radius` and `safety_radius_penalty` apply only to occupancy mode. Invalid map types are rejected, including the earlier ambiguous `cost`; use `cost_replace` for the behavior of `value_iteration`'s `cost`.
+Both cost modes read `/cost_map` and interpret each byte as unsigned: `0` through
+`254` are costs in seconds, and `255` (signed `-1`) is blocked. Signed `-2`
+therefore represents cost `254`. Cost maps supply their own inflation;
+`safety_radius` and `safety_radius_penalty` apply only in occupancy mode.
 
-Set `online` to `false` to load the map and publish nothing else. The launch file leaves it `true`.
+Unknown modes, including the older ambiguous `cost`, are rejected. Use
+`cost_replace` for the raw-cost behavior of `value_iteration`.
 
-## How a goal is stored
+### Parameters
 
-A cell is a goal only when both of its checked corners lie inside `goal_margin_radius` of the goal position, and its heading bin lies inside `goal_margin_theta` degrees of the goal yaw. Goal cells have cost 0. Every other free cell starts unreachable.
-
-Headings are `theta_cell_num` equal bins around the circle. With 60 bins, each bin is 6 degrees. The value must be from 1 to 64.
-
-Every free cell already costs 1 second to enter. Cells within `safety_radius` of an occupied cell cost an extra `safety_radius_penalty` seconds.
-
-If the log says that most free cells have no finite cost, the goal region is too small for the action steps. Increase `goal_margin_radius` (0.3 m is a useful next try on a 5 cm map).
-
-## Laser update
-
-`/scan` changes costs inside a square of radius `local_xy_range` around the robot (default 1 m).
-
-Along each return, from 10% to 90% of the range, the local penalty is halved. The cells within two cells of the hit are then given a local penalty of 2048 seconds. Returns that are non-finite or outside the scan's range are ignored. The field is then updated from those cells until the change settles. A new goal clears local penalties.
-
-## Parameters
-
-Numeric defaults below are the values in `config/params.yaml`, which the launch file loads. If you run `vi_node` with no parameter file, `online` is `false` and `global_thread_num` is `1`.
+Defaults below come from the shipped YAML. Without a parameter file,
+`online` defaults to `false` and `global_thread_num` to `1`.
 
 | Parameter | Default | Meaning |
 |---|---|---|
@@ -86,9 +134,12 @@ Numeric defaults below are the values in `config/params.yaml`, which the launch 
 | `local_xy_range` | `1.0` | Meters. Half-width of the square updated from the laser |
 | `config_file` | set by the launch file | Path of the YAML file that contains `action_list` |
 
-## Actions
+### Motion actions
 
-Actions live in `config/params.yaml` under `action_list`, next to `ros__parameters`. ROS 2 cannot store a list of maps as a parameter, so the node reads this list from the file. The number of entries is the number of actions. Add or remove entries to change the set. Each entry needs all three fields:
+Define `action_list` in [config/params.yaml](config/params.yaml), alongside the
+`/**` parameter section. ROS 2 cannot store a list of maps as a parameter, so the
+node reads this list directly from the file. Add or remove entries to change
+the action set; each entry needs all three fields:
 
 ```yaml
 action_list:
@@ -112,27 +163,91 @@ action_list:
     onestep_rotation_deg: 20.0
 ```
 
-`onestep_forward_m` is the forward step in meters. Negative is backward. `onestep_rotation_deg` is the rotation in degrees. Negative is clockwise when viewed from above. At most 127 actions.
+`onestep_forward_m` is the forward step in metres; negative means backward.
+`onestep_rotation_deg` is the rotation in degrees; negative means clockwise when
+viewed from above. The list supports at most 127 actions.
 
-The shipped list is six motions: 0.3 m forward, 0.2 m back, a turn of 20 degrees either way, and the same turn combined with 0.2 m forward.
+The shipped list has six motions: 0.3 m forward, 0.2 m backward, a 20 degree
+turn in either direction, and either turn combined with 0.2 m forward.
 
-## ROS 2 tests and lint
+## How it works
 
-CI builds and tests on ROS 2 Humble / Ubuntu 22.04. From a sourced ROS workspace:
+### Goal regions and solving
+
+A cell belongs to the goal region when both checked corners lie within
+`goal_margin_radius` and its heading bin lies within `goal_margin_theta` degrees
+of the goal yaw. Goal cells start at cost `0`; other free cells start unreachable.
+
+`theta_cell_num` divides a full turn into 1 through 64 equal heading bins:
+60 bins give 6 degrees per bin. Global solving runs until the goal's field stops
+changing. In occupancy mode, cells within `safety_radius` of an obstacle add
+`safety_radius_penalty` seconds to the 1 second base cost.
+
+If most free cells remain unreachable, the goal region may be too small for the
+motion steps. For a 5 cm map, try increasing `goal_margin_radius` to 0.3 m.
+
+### Laser updates
+
+Each scan updates a square with half-width `local_xy_range` around the robot
+(default 1 m). Along 10% through 90% of each valid return, the local penalty is
+halved. Cells within two cells of the hit receive a 2048 second penalty.
+
+Non-finite and out-of-range returns are ignored. Changed cells start an update
+that may propagate beyond the local window and stops when the change settles.
+A new goal clears the local penalties.
+
+### Comparison with earlier versions
+
+`value_iteration` is the ROS 1 planner; `value_iteration2` is its ROS 2 port.
+This package keeps the occupancy-map, pose, laser-scan, and discrete-command
+model, while making solving respond to goals and changed scan penalties.
+
+| Area | `value_iteration` | `value_iteration2` | This package |
+| --- | --- | --- | --- |
+| ROS | ROS 1 | ROS 2 | ROS 2 |
+| Goal input | `value_iteration/ViAction` action | `/goal_pose` | `/goal_pose` |
+| Value output | `policy` and `value` services | `/value_function`, every 1.5 s | `/value_function`, every 1.5 s |
+| Motion actions | Configurable parameter list | Six actions fixed in source | YAML list, up to 127 actions |
+| Global threads | `thread_num`, default 4 | `global_thread_num`, default 1 in code or 2 in YAML | `global_thread_num`, default 1 in code or 2 in YAML; 0 uses all cores |
+| Global solving | Continuous sweeps, even before a goal | Continuous sweeps, even before a goal | Starts on a goal and stops when settled |
+| Local updates | Continuous sweeps inside a fixed 1 m window | Continuous sweeps inside a fixed 1 m window | Starts on changed scan penalties and may propagate beyond the configurable window |
+| No available action | No command published | No command, unless idling | Zero command published |
+
+The ROS 1 map services are `static_map` and `cost_map`. This package uses
+`/map_server/map` for occupancy maps and implements `/cost_map` with ROS 2
+clients; the equivalent cost-service branch in `value_iteration2` is commented
+out. `cost_replace` preserves its raw-cost conversion, while `cost_add` adds the
+1 second base cost.
+
+Legacy YAML keys such as `gthread_num`, `gsafety_*`, `ggoal_*`, `gmap_type`, and
+`local_thread_num` are not used here. Use the names under
+[Parameters](#parameters).
+
+## Testing
+
+CI builds and runs the solver, ROS integration tests, and ament lint checks on
+Humble, Jazzy, and Lyrical, on both x86_64 and ARM64. The badges at the top track
+each distribution's x86_64 build-and-test job on `main`; follow them to view the
+complete matrix.
+
+From the workspace root after building:
 
 ```bash
-rosdep install --from-paths src --ignore-src --rosdistro humble -y
-colcon build --packages-select value_iteration3 --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash
-colcon test --packages-select value_iteration3 --event-handlers console_direct+ --return-code-on-test-failure
+colcon test --packages-select value_iteration3 \
+  --event-handlers console_direct+ --return-code-on-test-failure
 colcon test-result --verbose
 ```
 
-Tests use `ament_cmake_test` and `ament_cmake_pytest`. The solver checks unsigned cost decoding, blocked cells, and unchanged occupancy behavior. ROS integration tests launch the installed node with real `nav_msgs/GetMap` services, check both service routes and map metadata, and verify that raw 254 is traversable while 255 is blocked. Lint uses ament cppcheck (C++ static analysis), flake8 (Python), lint_cmake, and xmllint. CI uploads their result files.
+The solver tests cover action parsing, thread-count agreement, blocked cells,
+raw cost decoding, and laser penalties. Integration tests run the installed node
+against real `nav_msgs/srv/GetMap` services and verify routing, map metadata,
+and the distinction between raw costs `254` and `255`. Lint runs cppcheck,
+flake8, lint_cmake, and xmllint. CI uploads the test result files.
 
-## Solver test
+### Standalone solver test
 
-This checks the solver without ROS. It needs a C++17 compiler and pthreads.
+To test without ROS, use a C++17 compiler and pthreads from the repository root:
 
 ```bash
 c++ -std=c++17 -O2 -pthread -I include \
@@ -141,42 +256,13 @@ c++ -std=c++17 -O2 -pthread -I include \
 /tmp/planner_test
 ```
 
-`planner_test ok` means the action list parsed, two thread counts agreed, a far cell reached the goal, a walled-in cell stayed blocked, and a laser hit raised costs without lowering any.
+The test prints `planner_test ok` on success.
 
-## Differences from value_iteration and value_iteration2
+## License and attribution
 
-`value_iteration` is the ROS 1 planner. `value_iteration2` is its ROS 2 port. This package keeps the same kind of goal, scan, and velocity command, and changes when the field is solved and which inputs are accepted.
+Author: nop (noplab90@gmail.com).
 
-Shared with both of them:
-
-- An occupancy grid, a pose in `map`, and a laser scan.
-- A goal cell must lie inside `goal_margin_radius` and `goal_margin_theta`. The node defaults are 0.2 m and 10 degrees. Many `value_iteration` launch files override those to 0.3 m and 15 degrees.
-- The same six motions are shipped: 0.3 m forward, 0.2 m back, ±20 degrees, and ±20 degrees with 0.2 m forward.
-- Free cells cost 1 second to enter. Cells within `safety_radius` (0.2 m) cost an extra `safety_radius_penalty` (30 seconds).
-- A laser hit inside 1 m adds a local penalty of 2048 seconds, and cells along the beam have that penalty halved.
-- `/cmd_vel` repeats the chosen step. It is not a smooth velocity.
-
-Different in this package:
-
-| | `value_iteration` | `value_iteration2` | this package |
-|---|---|---|---|
-| ROS | ROS 1 | ROS 2 | ROS 2 |
-| Goal input | Action `value_iteration/ViAction` | `/goal_pose` | `/goal_pose` |
-| Map service | `static_map`, or `cost_map` when `map_type` is `cost` | `/map_server/map`, or `/cost_map` for a cost grid | `/map_server/map`, or `/cost_map` with `map_type: cost_add` or `cost_replace` |
-| Value output | `policy` and `value` services (`grid_map_msgs/GetGridMap`) | `/value_function` occupancy grid, every 1.5 s | `/value_function` occupancy grid, every 1.5 s |
-| Actions | `action_list` parameter. The count can change | Six actions fixed in the source. The `action_list` in its YAML is commented out | `action_list` in `config/params.yaml`. The count can change, up to 127 |
-| Threads | `thread_num`, default 4 | `global_thread_num`, default 1 in code and 2 in its YAML. `local_thread_num` is in the YAML and is never read | `global_thread_num`, default 1 without a file and 2 in `params.yaml`. `0` uses every logical core. There is no `local_thread_num` |
-| When solving starts | The field is swept continuously in the background, including before a goal | Same continuous sweep. Threads start toward the origin before any goal | Solving starts when `/goal_pose` arrives, and runs until that goal's field stops changing |
-| Laser update | A separate thread keeps sweeping only the 1 m window, even when no new scan arrives. `local_xy_range` is fixed at 1 m | Same one local thread and the same fixed 1 m window | A scan that changes a penalty starts an update from those cells. The update may leave the window, and it stops when that change settles. `local_xy_range` is a parameter |
-| Scan samples | Every range in the message | Every range in the message | Drops non-finite ranges and ranges outside the scan's reported limits. Subscription uses sensor-data QoS |
-| No action at the current cell | `/cmd_vel` is published only while `online` is true and an action exists | A zero command is published while idling. A cell with no action publishes nothing, so the previous command can remain | A zero command is published, so the robot waits |
-| YAML keys `gthread_num`, `gsafety_*`, `ggoal_*`, `gmap_type` | Not used | Present in `params.yaml` and not read by the node | Not used. The names this node reads are listed under [Parameters](#parameters) |
-
-The cost-grid conversion matches `value_iteration2` (`ValueIterator::setMapWithCostGrid` and the raw-cost `State` constructor). Its upstream ROS 2 `/cost_map` service branch is commented out; this package implements that service path with ROS 2 clients. `cost_replace` keeps that conversion; `cost_add` adds the 1 second base cost to each free cell. Neither cost mode applies occupancy safety inflation.
-
-## License
-
-BSD-3-Clause. Copyright (c) 2026, nop and CIT autonomous robot laboratory.
+[BSD-3-Clause](LICENSE.txt). Copyright (c) 2026, nop and CIT autonomous robot laboratory.
 
 This package refers to two earlier BSD-3-Clause programs by Ryuichi Ueda:
 
