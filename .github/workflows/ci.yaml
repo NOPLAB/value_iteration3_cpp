@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ROS 2 ${{ matrix.ros_distro }} build and test (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        ros_distro: [humble, jazzy, lyrical]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    container: ros:${{ matrix.ros_distro }}-ros-base
+    defaults:
+      run:
+        shell: bash
+    env:
+      ROS_DISTRO: ${{ matrix.ros_distro }}
+      ROS_LOCALHOST_ONLY: "1"
+      MAKEFLAGS: -j2
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: src/value_iteration3
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            python3-colcon-common-extensions python3-rosdep
+          if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then
+            rosdep init
+          fi
+          rosdep update --rosdistro "$ROS_DISTRO"
+          rosdep install --from-paths src --ignore-src \
+            --rosdistro "$ROS_DISTRO" -y
+
+      - name: Build
+        run: |
+          source /opt/ros/"$ROS_DISTRO"/setup.bash
+          colcon build --packages-select value_iteration3 --executor sequential \
+            --event-handlers console_direct+ \
+            --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+
+      - name: Test and lint
+        run: |
+          source install/setup.bash
+          colcon test --packages-select value_iteration3 \
+            --event-handlers console_direct+ \
+            --return-code-on-test-failure
+
+      - name: Report test results
+        if: always()
+        run: colcon test-result --verbose
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.ros_distro }}-${{ matrix.runner }}-test-results
+          path: build/value_iteration3/test_results
