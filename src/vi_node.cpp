@@ -426,11 +426,12 @@ int main(int argc, char **argv) {
     if (rclcpp::ok()) {
       rclcpp::spin(node);
     }
-  } catch (const rclcpp::exceptions::RCLError &) {
+  } catch (const rclcpp::exceptions::RCLError &error) {
     if (rclcpp::ok()) {
+      RCLCPP_ERROR(node->get_logger(), "ROS error: %s", error.what());
       node.reset();
       rclcpp::shutdown();
-      throw;
+      return 1;
     }
   }
   node.reset();
