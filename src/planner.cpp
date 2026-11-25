@@ -106,6 +106,9 @@ class PhaseBarrier {
   explicit PhaseBarrier(int parties) : parties_(parties) {}
 
   void arrive() {
+    if (parties_ <= 1) {
+      return;
+    }
     std::unique_lock<std::mutex> lock(mu_);
     const int generation = generation_;
     if (++waiting_ == parties_) {
@@ -326,6 +329,8 @@ void Planner::build_transitions() {
         bucket.prob = delta.prob;
         dst.push_back(bucket);
       }
+      std::sort(dst.begin(), dst.end(),
+                [](const Bucket &a, const Bucket &b) { return a.offset < b.offset; });
     }
   }
 }
@@ -345,6 +350,15 @@ void Planner::allocate_field() {
   mask_n_ = static_cast<std::size_t>(mask_w_) * static_cast<std::size_t>(ny_ + 2 * my_);
   mask_.reset(new std::atomic<std::uint64_t>[mask_n_]);
   zero_masks();
+  dilate_x_.assign(cells, 0);
+  dilate_y_.assign(cells, 0);
+  row_x_stamp_.assign(static_cast<std::size_t>(ny_), 0);
+  row_x0_.assign(static_cast<std::size_t>(ny_), 0);
+  row_x1_.assign(static_cast<std::size_t>(ny_), 0);
+  row_y_stamp_.assign(static_cast<std::size_t>(ny_), 0);
+  row_y0_.assign(static_cast<std::size_t>(ny_), 0);
+  row_y1_.assign(static_cast<std::size_t>(ny_), 0);
+  dilate_stamp_ = 0;
 }
 
 bool Planner::load_map(int width, int height, double resolution, double origin_x, double origin_y,
@@ -383,33 +397,39 @@ bool Planner::load_map(int width, int height, double resolution, double origin_x
   free_.assign(cells, 0);
   static_pen_.assign(cells, 0);
   const int margin = static_cast<int>(std::ceil(safety_radius / resolution_));
-  for (int y = 0; y < ny_; ++y) {
-    for (int x = 0; x < nx_; ++x) {
-      const std::size_t xy = static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * nx_;
-      if (map_type != MapType::Occupancy) {
-        const auto cost = static_cast<std::uint8_t>(occupancy[xy]);
-        free_[xy] = cost != 255;
-        const std::uint64_t base = map_type == MapType::CostAdd ? Scale::prob_base : 0;
-        static_pen_[xy] =
-            free_[xy] ? base + static_cast<std::uint64_t>(cost) * Scale::prob_base : 0;
-        continue;
-      }
-      if (occupancy[xy] != 0) {
-        continue;
-      }
-      free_[xy] = 1;
-      std::uint64_t penalty = Scale::prob_base;
-      for (int ix = x - margin; ix <= x + margin; ++ix) {
-        for (int iy = y - margin; iy <= y + margin; ++iy) {
-          const long pos = static_cast<long>(iy) * nx_ + ix;
-          if (pos >= 0 && pos < static_cast<long>(occupancy.size()) && occupancy[pos] != 0) {
-            penalty = static_cast<std::uint64_t>(safety_penalty * Scale::prob_base) + Scale::prob_base;
+  const std::uint64_t near_penalty =
+      static_cast<std::uint64_t>(safety_penalty * Scale::prob_base) + Scale::prob_base;
+  const long occ_size = static_cast<long>(occupancy.size());
+  for_rows([&](int y0, int y1) {
+    for (int y = y0; y < y1; ++y) {
+      for (int x = 0; x < nx_; ++x) {
+        const std::size_t xy = static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * nx_;
+        if (map_type != MapType::Occupancy) {
+          const auto cost = static_cast<std::uint8_t>(occupancy[xy]);
+          free_[xy] = cost != 255;
+          const std::uint64_t base = map_type == MapType::CostAdd ? Scale::prob_base : 0;
+          static_pen_[xy] =
+              free_[xy] ? base + static_cast<std::uint64_t>(cost) * Scale::prob_base : 0;
+          continue;
+        }
+        if (occupancy[xy] != 0) {
+          continue;
+        }
+        free_[xy] = 1;
+        std::uint64_t penalty = Scale::prob_base;
+        for (int ix = x - margin; ix <= x + margin && penalty == Scale::prob_base; ++ix) {
+          for (int iy = y - margin; iy <= y + margin; ++iy) {
+            const long pos = static_cast<long>(iy) * nx_ + ix;
+            if (pos >= 0 && pos < occ_size && occupancy[pos] != 0) {
+              penalty = near_penalty;
+              break;
+            }
           }
         }
+        static_pen_[xy] = penalty;
       }
-      static_pen_[xy] = penalty;
     }
-  }
+  });
 
   build_transitions();
   allocate_field();
@@ -421,23 +441,101 @@ bool Planner::load_map(int width, int height, double resolution, double origin_x
 }
 
 std::vector<std::pair<int, int>> Planner::dilate(
-    const std::vector<std::pair<int, int>> &cells) const {
-  std::vector<std::uint8_t> seen(static_cast<std::size_t>(nx_) * ny_, 0);
+    const std::vector<std::pair<int, int>> &cells) {
   std::vector<std::pair<int, int>> out;
-  out.reserve(cells.size());
+  if (cells.empty()) {
+    return out;
+  }
+  if (++dilate_stamp_ == 0) {
+    std::fill(dilate_x_.begin(), dilate_x_.end(), 0);
+    std::fill(dilate_y_.begin(), dilate_y_.end(), 0);
+    std::fill(row_x_stamp_.begin(), row_x_stamp_.end(), 0);
+    std::fill(row_y_stamp_.begin(), row_y_stamp_.end(), 0);
+    dilate_stamp_ = 1;
+  }
+  const std::uint32_t stamp = dilate_stamp_;
+  int min_y = ny_ - 1;
+  int max_y = 0;
+
+  // Pass 1: horizontal dilation into dilate_x_, recording per-row [x0, x1] spans.
   for (const auto &cell : cells) {
+    const int iy = cell.second;
     const int x0 = std::max(0, cell.first - mx_);
     const int x1 = std::min(nx_ - 1, cell.first + mx_);
-    const int y0 = std::max(0, cell.second - my_);
-    const int y1 = std::min(ny_ - 1, cell.second + my_);
-    for (int iy = y0; iy <= y1; ++iy) {
-      for (int ix = x0; ix <= x1; ++ix) {
-        const std::size_t xy = static_cast<std::size_t>(ix) + static_cast<std::size_t>(iy) * nx_;
-        if (seen[xy]) {
-          continue;
+    if (iy < min_y) {
+      min_y = iy;
+    }
+    if (iy > max_y) {
+      max_y = iy;
+    }
+    const std::size_t ry = static_cast<std::size_t>(iy);
+    if (row_x_stamp_[ry] != stamp) {
+      row_x_stamp_[ry] = stamp;
+      row_x0_[ry] = x0;
+      row_x1_[ry] = x1;
+    } else {
+      if (x0 < row_x0_[ry]) {
+        row_x0_[ry] = x0;
+      }
+      if (x1 > row_x1_[ry]) {
+        row_x1_[ry] = x1;
+      }
+    }
+    std::uint32_t *row = dilate_x_.data() + ry * static_cast<std::size_t>(nx_);
+    for (int ix = x0; ix <= x1; ++ix) {
+      row[ix] = stamp;
+    }
+  }
+
+  // Pass 2: vertical dilation on touched rows and spans into dilate_y_.
+  const int out_y0 = std::max(0, min_y - my_);
+  const int out_y1 = std::min(ny_ - 1, max_y + my_);
+  for (int iy = min_y; iy <= max_y; ++iy) {
+    const std::size_t ry = static_cast<std::size_t>(iy);
+    if (row_x_stamp_[ry] != stamp) {
+      continue;
+    }
+    const int x0 = row_x0_[ry];
+    const int x1 = row_x1_[ry];
+    const std::uint32_t *src = dilate_x_.data() + ry * static_cast<std::size_t>(nx_);
+    const int y0 = std::max(0, iy - my_);
+    const int y1 = std::min(ny_ - 1, iy + my_);
+    for (int oy = y0; oy <= y1; ++oy) {
+      const std::size_t roy = static_cast<std::size_t>(oy);
+      if (row_y_stamp_[roy] != stamp) {
+        row_y_stamp_[roy] = stamp;
+        row_y0_[roy] = x0;
+        row_y1_[roy] = x1;
+      } else {
+        if (x0 < row_y0_[roy]) {
+          row_y0_[roy] = x0;
         }
-        seen[xy] = 1;
-        out.emplace_back(ix, iy);
+        if (x1 > row_y1_[roy]) {
+          row_y1_[roy] = x1;
+        }
+      }
+      std::uint32_t *dst = dilate_y_.data() + roy * static_cast<std::size_t>(nx_);
+      for (int ix = x0; ix <= x1; ++ix) {
+        if (src[ix] == stamp) {
+          dst[ix] = stamp;
+        }
+      }
+    }
+  }
+
+  // Pass 3: collect candidates in row-major (iy, ix) order for cache locality and symmetric G-S.
+  out.reserve(cells.size());
+  for (int oy = out_y0; oy <= out_y1; ++oy) {
+    const std::size_t roy = static_cast<std::size_t>(oy);
+    if (row_y_stamp_[roy] != stamp) {
+      continue;
+    }
+    const int x0 = row_y0_[roy];
+    const int x1 = row_y1_[roy];
+    const std::uint32_t *row = dilate_y_.data() + roy * static_cast<std::size_t>(nx_);
+    for (int ix = x0; ix <= x1; ++ix) {
+      if (row[ix] == stamp) {
+        out.emplace_back(ix, oy);
       }
     }
   }
@@ -626,18 +724,16 @@ SolveResult Planner::run(bool all_headings_first, const std::atomic<std::uint32_
     }
     prev_cells_.clear();
 
-    std::vector<std::pair<int, int>> touched;
     for (int worker = 0; worker < thread_num_; ++worker) {
       for (const auto &item : changed_[static_cast<std::size_t>(worker)]) {
         const int ix = std::get<0>(item);
         const int iy = std::get<1>(item);
         const std::uint64_t bits = std::get<2>(item);
         mask_[mask_index(ix, iy)].store(bits, std::memory_order_relaxed);
-        touched.emplace_back(ix, iy);
+        prev_cells_.emplace_back(ix, iy);
       }
     }
-    prev_cells_ = touched;
-    const bool any = !touched.empty();
+    const bool any = !prev_cells_.empty();
     const auto now = std::chrono::steady_clock::now();
     if (now >= next_log) {
       std::ostringstream text;
@@ -648,7 +744,7 @@ SolveResult Planner::run(bool all_headings_first, const std::atomic<std::uint32_
 
     const bool stop = cancelled(epoch, ticket) || !any || iter >= kMaxRounds;
     if (!stop) {
-      candidates_ = dilate(touched);
+      candidates_ = dilate(prev_cells_);
       if (iter % 2 == 1) {
         std::reverse(candidates_.begin(), candidates_.end());
       }
