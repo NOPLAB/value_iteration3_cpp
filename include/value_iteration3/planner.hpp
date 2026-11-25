@@ -105,7 +105,7 @@ class Planner {
   void fill_cp(std::uint64_t value);
   void zero_masks();
   std::vector<std::pair<int, int>> dilate(
-      const std::vector<std::pair<int, int>> &cells) const;
+      const std::vector<std::pair<int, int>> &cells);
   std::uint64_t action_cost(int action, int theta, std::int64_t col) const;
   std::string audit() const;
   std::uint64_t compute_phase(int worker, bool all_headings);
@@ -164,6 +164,16 @@ class Planner {
   std::vector<std::uint64_t> pen_;
   std::vector<std::uint8_t> eval_ok_;
   std::unique_ptr<std::atomic<std::uint64_t>[]> mask_;
+
+  std::vector<std::uint32_t> dilate_x_;
+  std::vector<std::uint32_t> dilate_y_;
+  std::vector<std::uint32_t> row_x_stamp_;
+  std::vector<int> row_x0_;
+  std::vector<int> row_x1_;
+  std::vector<std::uint32_t> row_y_stamp_;
+  std::vector<int> row_y0_;
+  std::vector<int> row_y1_;
+  std::uint32_t dilate_stamp_ = 0;
 
   std::vector<std::pair<int, int>> candidates_;
   std::vector<std::vector<std::tuple<int, int, std::uint64_t>>> changed_;
